@@ -1,0 +1,25 @@
+# Reboot-EC2-Windows.ps1
+
+$servers = Import-Csv "C:\Scripts\servers.csv"
+
+foreach ($server in $servers) {
+    $ip = $server.IPAddress
+    $username = $server.Username
+    $password = $server.Password
+
+    Write-Host "Attempting to reboot $ip ..." -ForegroundColor Cyan
+
+    $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+    $cred = New-Object System.Management.Automation.PSCredential ($username, $securePassword)
+
+    try {
+        Invoke-Command -ComputerName $ip -Credential $cred -ScriptBlock {
+            Restart-Computer -Force
+        } -Authentication Basic -ErrorAction Stop
+
+        Write-Host ("Successfully rebooted $ip") -ForegroundColor Green
+    }
+    catch {
+        Write-Host ("Failed to reboot ${ip}: $($_.Exception.Message)") -ForegroundColor Red
+    }
+}
