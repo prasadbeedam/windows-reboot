@@ -1,0 +1,45 @@
+Yes, WinRM on ports 5985 and 5986 can be vulnerable—depending on how you configure and secure it. Here's a breakdown:
+
+🔓 Port 5985 (HTTP) – Unencrypted
+Plaintext traffic: Passwords and commands are sent unencrypted unless additional security is enforced (e.g., HTTPS or message-level encryption via Kerberos/NTLM).
+
+Vulnerable to:
+
+Man-in-the-middle (MitM) attacks
+
+Credential theft
+
+Replay attacks
+
+❌ Never use port 5985 in production across public or untrusted networks.
+
+🔐 Port 5986 (HTTPS) – Encrypted
+Uses SSL/TLS encryption.
+
+Requires a valid certificate on the remote machine.
+
+Much safer than 5985 if configured properly.
+
+Still vulnerable if:
+
+Using self-signed certs without proper validation.
+
+Weak TLS versions are enabled (e.g., TLS 1.0/1.1).
+
+Certificates are expired or not trusted.
+
+✅ Recommended for secure remote management.
+
+✅ Best Practices to Secure WinRM
+Practice	Recommendation
+🔒 Protocol	Use HTTPS (5986) only
+🔐 Authentication	Prefer Kerberos or certificate-based auth. Avoid Basic
+🔁 Encryption	Disable 5985 or enforce message-level encryption if must use
+🔍 Firewall	Allow access to 5986 only from specific IPs or management machines
+🧾 Audit	Enable PowerShell transcription logging, WinRM logs
+📜 Cert Management	Use a valid CA-signed cert, auto-renew with tools like Certbot (if domain joined)
+
+🧠 Summary
+Port	Secure?	Protocol	Recommendation
+5985	❌ No	HTTP	Disable or restrict to internal trusted LAN only
+5986	✅ Yes	HTTPS	Use with proper TLS + certificate config
