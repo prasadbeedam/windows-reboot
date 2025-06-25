@@ -1,0 +1,128 @@
+# Reboot-EC2-Windows-Extended.ps1
+
+$timestamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
+$logFile = "C:\Scripts\RebootLog_Extended_$timestamp.log"
+
+function Log {
+    param([string]$message)
+    $msg = "[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $message
+    Write-Host $msg
+    Add-Content -Path $logFile -Value $msg
+}
+
+function Are-NsrServicesRunning {
+    param($ip, $cred)
+    $services = Invoke-Command -ComputerName $ip -Credential $cred -ScriptBlock {
+        tasklist | findstr /I "nsr"
+    } -Authentication Basic -ErrorAction SilentlyContinue
+    return ($services -match "nsr") -and ($services -match "nsrd") -and ($services -match "nsrindexd") -and ($services -match "nsrjobd")
+}
+
+function Is-BackupRunning {
+    param($ip, $cred)
+    $backupProcesses = Invoke-Command -ComputerName $ip -Credential $cred -ScriptBlock {
+        tasklist | findstr /I "save nsrjobd"
+    } -Authentication Basic -ErrorAction SilentlyContinue
+    return $backupProcesses -match "save" -or $backupProcesses -match "nsrjobd"
+}
+
+function Start-BackupJob {
+    param($ip, $cred)
+    Invoke-Command -ComputerName $ip -Credential $cred -ScriptBlock {
+        Start-Process -NoNewWindow -FilePath "cmd.exe" -ArgumentList "/c save -s localhost C:\ > C:\tmp\backup.log"
+    } -Authentication Basic -ErrorAction SilentlyContinue
+}
+
+function Check-BackupStatus {
+    param($ip, $cred)
+    Start-Sleep -Seconds 60
+    $log = Invoke-Command -ComputerName $ip -Credential $cred -ScriptBlock {
+        if (Test-Path "C:\tmp\backup.log") {
+            Get-Content "C:\tmp\backup.log" -Tail 20
+        } else {
+            return "Backup log not found."
+        }
+    } -Authentication Basic -ErrorAction SilentlyContinue
+    return $log
+}
+
+# Start main execution
+
+$servers = Import-Csv "C:\Scripts\servers.csv"
+
+foreach ($server in $servers) {
+    $ip = $server.IPAddress
+    $username = $server.Username
+    $password = $server.Password
+    $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+    $cred = New-Object System.Management.Automation.PSCredential ($username, $securePassword)
+
+    Log "`n--- [$ip] Checking services and backup session ---"
+
+    if (-not (Are-NsrServicesRunning -ip $ip -cred $cred)) {
+        Log "[$ip] ERROR: Required NetWorker services are not all running."
+        continue
+    }
+
+    if (Is-BackupRunning -ip $ip -cred $cred) {
+        Log "[$ip] WARNING: Backup is currently running. Skipping reboot."
+        continue
+    }
+
+    Log "[$ip] Preconditions met. Proceeding with reboot..."
+
+    try {
+        Invoke-Command -ComputerName $ip -Credential $cred -ScriptBlock {
+            Restart-Computer -Force
+        } -Authentication Basic -ErrorAction Stop
+    } catch {
+        Log "[$ip] ERROR: Failed to initiate reboot - $($_.Exception.Message)"
+        continue
+    }
+
+    $online = $false
+    $elapsed = 0
+    while (-not $online -and $elapsed -lt 600) {
+        try {
+            Invoke-Command -ComputerName $ip -Credential $cred -ScriptBlock { "pong" } -Authentication Basic -ErrorAction Stop
+            $online = $true
+        } catch {
+            Start-Sleep -Seconds 10
+            $elapsed += 10
+        }
+    }
+
+    if (-not $online) {
+        Log "[$ip] ERROR: Server did not come back online in 10 minutes."
+        continue
+    }
+
+    Log "[$ip] Server is back online. Checking NetWorker services..."
+
+    $servicesUp = $false
+    $waited = 0
+    while (-not $servicesUp -and $waited -lt 600) {
+        if (Are-NsrServicesRunning -ip $ip -cred $cred) {
+            $servicesUp = $true
+        } else {
+            Start-Sleep -Seconds 10
+            $waited += 10
+        }
+    }
+
+    if (-not $servicesUp) {
+        Log "[$ip] ERROR: NetWorker services did not come online in 10 minutes."
+        continue
+    }
+
+    Log "[$ip] All NetWorker services are running post-reboot. Starting backup..."
+    Start-BackupJob -ip $ip -cred $cred
+
+    $backupStatus = Check-BackupStatus -ip $ip -cred $cred
+    Log "[$ip] Backup Status:"
+    $backupStatus | ForEach-Object { Log "    $_" }
+
+    Log "--- [$ip] Reboot and backup complete ---"
+}
+
+Log "`n======== All servers processed. Log saved at $logFile ========"
