@@ -1,0 +1,141 @@
+# Reboot-EC2-Windows.ps1
+
+$timestamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
+$logFile = "C:\Scripts\RebootLog_$timestamp.log"
+
+function Log {
+    param([string]$message)
+    $timeStamped = "[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $message
+    Write-Host $timeStamped
+    Add-Content -Path $logFile -Value $timeStamped
+}
+
+$servers = Import-Csv "C:\Scripts\servers.csv"
+
+foreach ($server in $servers) {
+    $ip = $server.IPAddress
+    $username = $server.Username
+    $password = $server.Password
+
+    Log "`n--- [$ip] Checking NetWorker services before reboot ---"
+
+    $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+    $cred = New-Object System.Management.Automation.PSCredential ($username, $securePassword)
+
+    # Pre-reboot: Get-Service
+    Log "[$ip] Pre-reboot NetWorker services (via Get-Service):"
+    try {
+        $preStatus = Invoke-Command -ComputerName $ip -Credential $cred -ScriptBlock {
+            Get-Service | Where-Object { $_.Name -like "nsr*" -or $_.DisplayName -like "*NetWorker*" } |
+            Select-Object DisplayName, Name, Status, StartType
+        } -Authentication Basic -ErrorAction Stop
+
+        $preStatus | ForEach-Object { Log "  $($_.DisplayName) [$($_.Name)] - $($_.Status) - $($_.StartType)" }
+    } catch {
+        Log "[$ip] ERROR: Failed to check services (Get-Service) - $($_.Exception.Message)"
+    }
+
+    # Pre-reboot: tasklist
+    Log "[$ip] Pre-reboot NetWorker processes (via tasklist):"
+    try {
+        $preProcesses = Invoke-Command -ComputerName $ip -Credential $cred -ScriptBlock {
+            tasklist | findstr /I "nsr"
+        } -Authentication Basic -ErrorAction Stop
+
+        $preProcesses | ForEach-Object { Log "  $_" }
+    } catch {
+        Log "[$ip] ERROR: Failed to check processes (tasklist) - $($_.Exception.Message)"
+    }
+
+    # Reboot
+    Log "[$ip] Rebooting server ..."
+    try {
+        Invoke-Command -ComputerName $ip -Credential $cred -ScriptBlock {
+            Restart-Computer -Force
+        } -Authentication Basic -ErrorAction Stop
+    } catch {
+        Log "[$ip] ERROR: Failed to send reboot command - $($_.Exception.Message)"
+        continue
+    }
+
+    # Wait for server
+    Log "[$ip] Waiting for server to come online (via WinRM)..."
+    $online = $false
+    $maxWait = 300
+    $elapsed = 0
+    while (-not $online -and $elapsed -lt $maxWait) {
+        try {
+            Invoke-Command -ComputerName $ip -Credential $cred -ScriptBlock { "pong" } -Authentication Basic -ErrorAction Stop
+            $online = $true
+        } catch {
+            Start-Sleep -Seconds 5
+            $elapsed += 5
+        }
+    }
+
+    if (-not $online) {
+        Log "[$ip] ERROR: Server did not respond to WinRM within $maxWait seconds."
+        continue
+    }
+
+    $minutes = [math]::Round($elapsed / 60, 2)
+    Log "[$ip] Server is online after $minutes minutes."
+
+    # Wait for nsrd.exe
+    Log "[$ip] Waiting for NetWorker services to start (max 5 min)..."
+    $maxServiceWait = 300
+    $serviceElapsed = 0
+    $serviceReady = $false
+
+    while (-not $serviceReady -and $serviceElapsed -lt $maxServiceWait) {
+        try {
+            $running = Invoke-Command -ComputerName $ip -Credential $cred -ScriptBlock {
+                tasklist | findstr /I "nsrd.exe"
+            } -Authentication Basic -ErrorAction SilentlyContinue
+
+            if ($running) {
+                $serviceReady = $true
+            } else {
+                Log "[$ip] nsrd.exe not yet started... waiting."
+            }
+        } catch {
+            Log "[$ip] ERROR: Could not query tasklist - $($_.Exception.Message)"
+        }
+
+        Start-Sleep -Seconds 10
+        $serviceElapsed += 10
+    }
+
+    if (-not $serviceReady) {
+        Log "[$ip] WARNING: nsrd.exe did not appear within 5 minutes."
+    }
+
+    # Post-reboot: Get-Service
+    Log "`n[$ip] Post-reboot NetWorker services (via Get-Service):"
+    try {
+        $postStatus = Invoke-Command -ComputerName $ip -Credential $cred -ScriptBlock {
+            Get-Service | Where-Object { $_.Name -like "nsr*" -or $_.DisplayName -like "*NetWorker*" } |
+            Select-Object DisplayName, Name, Status, StartType
+        } -Authentication Basic -ErrorAction Stop
+
+        $postStatus | ForEach-Object { Log "  $($_.DisplayName) [$($_.Name)] - $($_.Status) - $($_.StartType)" }
+    } catch {
+        Log "[$ip] ERROR: Failed to check services after reboot (Get-Service) - $($_.Exception.Message)"
+    }
+
+    # Post-reboot: tasklist
+    Log "[$ip] Post-reboot NetWorker processes (via tasklist):"
+    try {
+        $postProcesses = Invoke-Command -ComputerName $ip -Credential $cred -ScriptBlock {
+            tasklist | findstr /I "nsr"
+        } -Authentication Basic -ErrorAction Stop
+
+        $postProcesses | ForEach-Object { Log "  $_" }
+    } catch {
+        Log "[$ip] ERROR: Failed to check processes after reboot (tasklist) - $($_.Exception.Message)"
+    }
+
+    Log "--- [$ip] Reboot check complete ---`n"
+}
+
+Log "======== All operations completed. Log saved at $logFile ========"
